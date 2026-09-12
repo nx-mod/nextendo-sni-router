@@ -35,24 +35,27 @@ func main() {
 	ssbu := envOr("BACKEND_SSBU", "127.0.0.1:8444")
 	arms := envOr("BACKEND_ARMS", "127.0.0.1:8445")
 	dauth := envOr("BACKEND_DAUTH", "127.0.0.1:8446")
+	baas := envOr("BACKEND_BAAS", "127.0.0.1:8453")
+	baasproxy := envOr("BACKEND_BAASPROXY", "")
+	catchall := os.Getenv("BAASPROXY_CATCHALL") == "1"
 	def := envOr("BACKEND_DEFAULT", mk8)
 
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s dauth=%s default=%s", listen, mk8, ssbu, arms, dauth, def)
+	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s dauth=%s baas=%s baasproxy=%s catchall=%v default=%s", listen, mk8, ssbu, arms, dauth, baas, baasproxy, catchall, def)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, dauth, def)
+		go handle(c, mk8, ssbu, arms, dauth, baas, baasproxy, catchall, def)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, dauth, def string) {
+func handle(c net.Conn, mk8, ssbu, arms, dauth, baas, baasproxy string, catchall bool, def string) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -69,8 +72,24 @@ func handle(c net.Conn, mk8, ssbu, arms, dauth, def string) {
 		case strings.Contains(sni, "g25c08801"):
 			backend = arms
 		case strings.Contains(sni, "ndas.srv.nintendo.net"), strings.Contains(sni, "dragons.nintendo.net"):
-			backend = dauth
+			if baasproxy != "" {
+				backend = baasproxy
+			} else {
+				backend = dauth
+			}
+		case strings.Contains(sni, "baas.nintendo.com"), strings.Contains(sni, "penne.srv.nintendo.net"), strings.Contains(sni, "vermillion.srv.nintendo.net"):
+			if baasproxy != "" {
+				backend = baasproxy
+			} else {
+				backend = baas
+			}
 		}
+	}
+	// Console sometimes omits SNI (empty-SNI connections). If a baas-proxy is
+	// configured and catch-all is enabled, send those to the proxy too so we
+	// capture the BAAS login/federation calls that arrive without SNI.
+	if sni == "" && baasproxy != "" && catchall {
+		backend = baasproxy
 	}
 	log.Printf("conn from %s sni=%q -> %s", c.RemoteAddr(), sni, backend)
 
