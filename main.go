@@ -48,6 +48,7 @@ func main() {
 	// boucle de retry sur /1.0.0/application/token. baas-proxy termine son propre
 	// TLS, donc on lui passe le flux brut sans déchiffrer.
 	baas := envOr("BACKEND_BAASPROXY", "127.0.0.1:8463")
+	scsi := envOr("BACKEND_SCSI", "127.0.0.1:8452")
 	// Diablo III parle Demonware, pas NEX : son auth HTTPS
 	// (crimson-switch-auth3.*.demonware.net) va au serveur diablo-3. Le lobby
 	// (TCP/UDP 3074) ne passe pas par ici.
@@ -59,18 +60,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s account=%s baas=%s d3=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, account, baas, d3, def)
+	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s account=%s baas=%s d3=%s scsi=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, account, baas, d3, scsi, def)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, acnh, dauth, account, baas, d3, def, proxyProto)
+		go handle(c, mk8, ssbu, arms, acnh, dauth, account, baas, d3, scsi, def, proxyProto)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, d3, def string, proxyProto bool) {
+func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, d3, scsi, def string, proxyProto bool) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -105,8 +106,22 @@ func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, d3, def str
 			// L'auth diablo-3 lit l'en-tete PROXY comme les auth NEX
 			// (NEXTENDO_PROXY_PROTOCOL=1) : il sert a l'online-check.
 			backend, wantProxy = d3, proxyProto
+		// nx-scsi tourne en local : il n'avait simplement aucune route, donc
+		// storage.hac.lp1.scsi partait sur le backend par défaut.
+		case strings.Contains(sni, "scsi.srv.nintendo.net"):
+			backend = scsi
 		}
 	}
+	// BACKEND_DEFAULT valait MK8 : tout hôte non routé (eshop, penne, bcat,
+	// capi.lp1.op2, SNI vide...) atterrissait sur le serveur d'auth NEX de Mario
+	// Kart, qui ne sait pas y répondre et refusait. On ferme proprement plutôt
+	// que de polluer un service avec du trafic qui ne le concerne pas.
+	// BACKEND_DEFAULT=drop (ou vide) active ce comportement.
+	if backend == "" || backend == "drop" {
+		log.Printf("conn from %s sni=%q -> drop (aucune route)", c.RemoteAddr(), sni)
+		return
+	}
+
 	log.Printf("conn from %s sni=%q -> %s", c.RemoteAddr(), sni, backend)
 
 	up, err := net.Dial("tcp", backend)
