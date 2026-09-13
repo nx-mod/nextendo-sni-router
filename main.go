@@ -9,6 +9,7 @@
 //	g2ee2e300-...srv.nintendo.net  -> ACNH auth  (BACKEND_ACNH)
 //	*.ndas.srv.nintendo.net        -> nx-dauth   (BACKEND_DAUTH)
 //	*.dragons.nintendo.net         -> nx-dauth   (BACKEND_DAUTH)
+//	*.demonware.net                -> Diablo III auth, diablo-3 (BACKEND_D3)
 //	anything else                  -> BACKEND_DEFAULT (MK8 by default)
 package main
 
@@ -47,6 +48,10 @@ func main() {
 	// boucle de retry sur /1.0.0/application/token. baas-proxy termine son propre
 	// TLS, donc on lui passe le flux brut sans déchiffrer.
 	baas := envOr("BACKEND_BAASPROXY", "127.0.0.1:8463")
+	// Diablo III parle Demonware, pas NEX : son auth HTTPS
+	// (crimson-switch-auth3.*.demonware.net) va au serveur diablo-3. Le lobby
+	// (TCP/UDP 3074) ne passe pas par ici.
+	d3 := envOr("BACKEND_D3", "127.0.0.1:8460")
 	def := envOr("BACKEND_DEFAULT", mk8)
 	proxyProto := envOr("SNI_PROXY_PROTOCOL", "") == "1"
 
@@ -54,18 +59,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s account=%s baas=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, account, baas, def)
+	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s account=%s baas=%s d3=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, account, baas, d3, def)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, acnh, dauth, account, baas, def, proxyProto)
+		go handle(c, mk8, ssbu, arms, acnh, dauth, account, baas, d3, def, proxyProto)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, def string, proxyProto bool) {
+func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, d3, def string, proxyProto bool) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -96,6 +101,10 @@ func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, def string,
 			backend = baas
 		case strings.Contains(sni, "accounts.nintendo.com"):
 			backend = account
+		case strings.Contains(sni, "demonware.net"):
+			// L'auth diablo-3 lit l'en-tete PROXY comme les auth NEX
+			// (NEXTENDO_PROXY_PROTOCOL=1) : il sert a l'online-check.
+			backend, wantProxy = d3, proxyProto
 		}
 	}
 	log.Printf("conn from %s sni=%q -> %s", c.RemoteAddr(), sni, backend)
