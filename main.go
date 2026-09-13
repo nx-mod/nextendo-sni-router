@@ -7,6 +7,7 @@
 //	g23380901-...srv.nintendo.net  -> SSBU auth  (BACKEND_SSBU)
 //	g25c08801-...srv.nintendo.net  -> ARMS auth  (BACKEND_ARMS)
 //	g2ee2e300-...srv.nintendo.net  -> ACNH auth  (BACKEND_ACNH)
+//	g241c6800-...srv.nintendo.net  -> Borderlands auth (BACKEND_BL1)
 //	*.ndas.srv.nintendo.net        -> nx-dauth   (BACKEND_DAUTH)
 //	*.dragons.nintendo.net         -> nx-dauth   (BACKEND_DAUTH)
 //	*.demonware.net                -> Diablo III auth, diablo-3 (BACKEND_D3)
@@ -38,6 +39,8 @@ func main() {
 	ssbu := envOr("BACKEND_SSBU", "127.0.0.1:8444")
 	arms := envOr("BACKEND_ARMS", "127.0.0.1:8445")
 	acnh := envOr("BACKEND_ACNH", "127.0.0.1:8447")
+	// Borderlands GOTY (NEX, game server 0x241c6800) -> borderlands-1.
+	bl1 := envOr("BACKEND_BL1", "127.0.0.1:8456")
 	dauth := envOr("BACKEND_DAUTH", "127.0.0.1:8446")
 	// nnAccount (« Lier un compte Nintendo ») résout accounts.nintendo.com via
 	// DNS-MITM et arrive ici en TLS. Le service de comptes, lui, ne parle que
@@ -60,18 +63,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s account=%s baas=%s d3=%s scsi=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, account, baas, d3, scsi, def)
+	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s bl1=%s dauth=%s account=%s baas=%s d3=%s scsi=%s default=%s", listen, mk8, ssbu, arms, acnh, bl1, dauth, account, baas, d3, scsi, def)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, acnh, dauth, account, baas, d3, scsi, def, proxyProto)
+		go handle(c, mk8, ssbu, arms, acnh, bl1, dauth, account, baas, d3, scsi, def, proxyProto)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, d3, scsi, def string, proxyProto bool) {
+func handle(c net.Conn, mk8, ssbu, arms, acnh, bl1, dauth, account, baas, d3, scsi, def string, proxyProto bool) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -96,6 +99,8 @@ func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, account, baas, d3, scsi, d
 			backend, wantProxy = arms, proxyProto
 		case strings.Contains(sni, "g2ee2e300"):
 			backend, wantProxy = acnh, proxyProto
+		case strings.Contains(sni, "g241c6800"):
+			backend, wantProxy = bl1, proxyProto
 		case strings.Contains(sni, "ndas.srv.nintendo.net"), strings.Contains(sni, "dragons.nintendo.net"):
 			backend = dauth
 		case strings.Contains(sni, "baas.nintendo.com"):
