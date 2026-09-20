@@ -9,6 +9,7 @@
 //	g2ee2e300-...srv.nintendo.net  -> ACNH auth  (BACKEND_ACNH)
 //	*.ndas.srv.nintendo.net        -> nx-dauth   (BACKEND_DAUTH)
 //	*.dragons.nintendo.net         -> nx-dauth   (BACKEND_DAUTH)
+//	*.demonware.net                -> Diablo III auth, diablo-3 (BACKEND_D3)
 //	anything else                  -> BACKEND_DEFAULT (MK8 by default)
 package main
 
@@ -37,24 +38,28 @@ func main() {
 	arms := envOr("BACKEND_ARMS", "127.0.0.1:8445")
 	acnh := envOr("BACKEND_ACNH", "127.0.0.1:8447")
 	dauth := envOr("BACKEND_DAUTH", "127.0.0.1:8446")
+	// Diablo III speaks Demonware, not NEX: its HTTPS login
+	// (crimson-switch-auth3.*.demonware.net) goes to the diablo-3 server. Its
+	// lobby and NAT probes (TCP/UDP 3074) do not come through here.
+	d3 := envOr("BACKEND_D3", "127.0.0.1:8460")
 	def := envOr("BACKEND_DEFAULT", mk8)
 
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, def)
+	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s d3=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, d3, def)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, acnh, dauth, def)
+		go handle(c, mk8, ssbu, arms, acnh, dauth, d3, def)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, def string) {
+func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, d3, def string) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -74,6 +79,8 @@ func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, def string) {
 			backend = acnh
 		case strings.Contains(sni, "ndas.srv.nintendo.net"), strings.Contains(sni, "dragons.nintendo.net"):
 			backend = dauth
+		case strings.Contains(sni, "demonware.net"):
+			backend = d3
 		}
 	}
 	log.Printf("conn from %s sni=%q -> %s", c.RemoteAddr(), sni, backend)
