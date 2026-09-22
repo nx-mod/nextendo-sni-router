@@ -43,6 +43,9 @@ func main() {
 	// (crimson-switch-auth3.*.demonware.net) va au serveur diablo-3. Le lobby
 	// (TCP/UDP 3074) ne passe pas par ici.
 	d3 := envOr("BACKEND_D3", "127.0.0.1:8460")
+	// BCAT (news, notices, per-game data): the bcat-list / bcat-topics / download
+	// hosts on *.cdn.nintendo.net go to the nextendo-bcat server (its own TLS listener).
+	bcat := envOr("BACKEND_BCAT", "127.0.0.1:8466")
 	def := envOr("BACKEND_DEFAULT", mk8)
 	proxyProto := envOr("SNI_PROXY_PROTOCOL", "") == "1"
 
@@ -50,18 +53,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s d3=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, d3, def)
+	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s d3=%s bcat=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, d3, bcat, def)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, acnh, dauth, d3, def, proxyProto)
+		go handle(c, mk8, ssbu, arms, acnh, dauth, d3, bcat, def, proxyProto)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, d3, def string, proxyProto bool) {
+func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, d3, bcat, def string, proxyProto bool) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -92,6 +95,10 @@ func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, d3, def string, proxyProto
 			// L'auth diablo-3 lit l'en-tete PROXY comme les auth NEX
 			// (NEXTENDO_PROXY_PROTOCOL=1) : il sert a l'online-check.
 			backend, wantProxy = d3, proxyProto
+		case strings.Contains(sni, "bcat-"):
+			// bcat-list / bcat-topics / bcat-data on cdn.nintendo.net -> nextendo-bcat.
+			// It terminates TLS itself, so no PROXY header.
+			backend = bcat
 		}
 	}
 	log.Printf("conn from %s sni=%q -> %s", c.RemoteAddr(), sni, backend)
