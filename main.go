@@ -43,6 +43,15 @@ func main() {
 	// (crimson-switch-auth3.*.demonware.net) va au serveur diablo-3. Le lobby
 	// (TCP/UDP 3074) ne passe pas par ici.
 	d3 := envOr("BACKEND_D3", "127.0.0.1:8460")
+	// Comptes : quand BACKEND_BAASPROXY est renseigné, tout le trafic
+	// accounts.nintendo.com / *.baas.nintendo.com / penne / vermillion part vers
+	// baas-proxy, qui relaie vers le vrai Nextendo (51.178.29.194) en gardant le
+	// Host d'origine -> on peut utiliser un compte Nextendo légitime avec la
+	// console pointée sur le stack local. Sinon on retombe sur BACKEND_BAAS
+	// (baas-jwks local) pour la vérification de la signature des tokens.
+	baas := envOr("BACKEND_BAAS", "127.0.0.1:8453")
+	baasproxy := envOr("BACKEND_BAASPROXY", "")
+	catchall := os.Getenv("BAASPROXY_CATCHALL") == "1"
 	def := envOr("BACKEND_DEFAULT", mk8)
 	proxyProto := envOr("SNI_PROXY_PROTOCOL", "") == "1"
 
@@ -50,18 +59,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s d3=%s default=%s", listen, mk8, ssbu, arms, acnh, dauth, d3, def)
+	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s dauth=%s d3=%s baas=%s baasproxy=%s catchall=%v default=%s", listen, mk8, ssbu, arms, acnh, dauth, d3, baas, baasproxy, catchall, def)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, acnh, dauth, d3, def, proxyProto)
+		go handle(c, mk8, ssbu, arms, acnh, dauth, d3, baas, baasproxy, catchall, def, proxyProto)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, d3, def string, proxyProto bool) {
+func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, d3, baas, baasproxy string, catchall bool, def string, proxyProto bool) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -87,12 +96,38 @@ func handle(c net.Conn, mk8, ssbu, arms, acnh, dauth, d3, def string, proxyProto
 		case strings.Contains(sni, "g2ee2e300"):
 			backend, wantProxy = acnh, proxyProto
 		case strings.Contains(sni, "ndas.srv.nintendo.net"), strings.Contains(sni, "dragons.nintendo.net"):
-			backend = dauth
+			if baasproxy != "" {
+				backend = baasproxy
+			} else {
+				backend = dauth
+			}
+		case strings.Contains(sni, "baas.nintendo.com"), strings.Contains(sni, "penne.srv.nintendo.net"), strings.Contains(sni, "vermillion.srv.nintendo.net"):
+			if baasproxy != "" {
+				backend = baasproxy
+			} else {
+				backend = baas
+			}
+		case strings.Contains(sni, "nintendo.com"), strings.Contains(sni, "nintendo.net"), strings.Contains(sni, "cdn.nintendo.net"):
+			// accounts.nintendo.com (nnAccount link), bcat-topics-list / bcat-list
+			// CDN, etc. — anything else Nintendo-branded that a game hits while
+			// going online. Route to baas-proxy so these don't fall into the dead
+			// default backend (MK8) and hang the connection.
+			if baasproxy != "" {
+				backend = baasproxy
+			} else {
+				backend = def
+			}
 		case strings.Contains(sni, "demonware.net"):
 			// L'auth diablo-3 lit l'en-tete PROXY comme les auth NEX
 			// (NEXTENDO_PROXY_PROTOCOL=1) : il sert a l'online-check.
 			backend, wantProxy = d3, proxyProto
 		}
+	}
+	// La console omet parfois le SNI (connexions vides). Si un baas-proxy est
+	// configuré avec catch-all actif, on lui envoie quand même ces appels pour
+	// capter les connexions BAAS login/federation sans SNI.
+	if sni == "" && baasproxy != "" && catchall {
+		backend = baasproxy
 	}
 	log.Printf("conn from %s sni=%q -> %s", c.RemoteAddr(), sni, backend)
 
