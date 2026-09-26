@@ -1,20 +1,30 @@
 // sni-router: a minimal TLS SNI passthrough proxy. It peeks the ClientHello on
 // :443, reads the SNI hostname, and forwards the raw TLS stream to the right
-// backend (MK8 auth vs SSBU auth) WITHOUT terminating TLS — so both games' NEX
-// auth servers can share :443. The backends terminate TLS themselves (WSS).
+// backend WITHOUT terminating TLS, so every game's NEX auth server, the account
+// hosts and the BCAT/SCSI services can share :443. The backends terminate TLS
+// themselves (WSS).
 //
-//	g2b309e01-...srv.nintendo.net  -> MK8 auth   (BACKEND_MK8)
-//	g23380901-...srv.nintendo.net  -> SSBU auth  (BACKEND_SSBU)
-//	g25c08801-...srv.nintendo.net  -> ARMS auth  (BACKEND_ARMS)
-//	g2ee2e300-...srv.nintendo.net  -> ACNH auth  (BACKEND_ACNH)
-//	g21f12900-...srv.nintendo.net  -> SMB35 auth (BACKEND_SMB35)
-//	g23932a00-...srv.nintendo.net  -> Mario Tennis Aces auth (BACKEND_TENNIS)
-//	g22306d00-...srv.nintendo.net  -> Super Mario Maker 2 auth (BACKEND_SMM2)
-//	*.acbaa.srv.nintendo.net       -> ACNH REST companion API (BACKEND_ACNH_API)
-//	*.ndas.srv.nintendo.net        -> nx-dauth   (BACKEND_DAUTH)
-//	*.dragons.nintendo.net         -> nx-dauth   (BACKEND_DAUTH)
-//	*.demonware.net                -> Diablo III auth, diablo-3 (BACKEND_D3)
-//	anything else                  -> BACKEND_DEFAULT (MK8 by default)
+// Routes, first match wins (the SNI is matched as a substring):
+//
+//	g2b309e01  Mario Kart 8 Deluxe        BACKEND_MK8      (NEX, PROXY header)
+//	g23380901  Super Smash Bros. Ultimate BACKEND_SSBU     (NEX, PROXY header)
+//	g25c08801  ARMS                       BACKEND_ARMS     (NEX, PROXY header)
+//	g2ee2e300  Animal Crossing NH         BACKEND_ACNH     (NEX, PROXY header)
+//	g21f12900  Super Mario Bros. 35       BACKEND_SMB35    (NEX, PROXY header)
+//	g23932a00  Mario Tennis Aces          BACKEND_TENNIS   (NEX, PROXY header)
+//	g22306d00  Super Mario Maker 2        BACKEND_SMM2     (NEX, PROXY header)
+//	g241c6800  Borderlands GOTY           BACKEND_BL1      (NEX, PROXY header)
+//	g2e608000  Torchlight II              BACKEND_TL2      (NEX, PROXY header)
+//	g27723500  Advance Wars 1+2           BACKEND_AW       (NEX, PROXY header)
+//	acbaa.srv.nintendo.net                BACKEND_ACNH_API (ACNH REST API)
+//	ndas.srv / dragons.nintendo.net       baas-proxy if set, else BACKEND_DAUTH
+//	baas / penne / vermillion             baas-proxy if set, else BACKEND_BAAS
+//	accounts.nintendo.com                 BACKEND_ACCOUNT, else baas-proxy
+//	scsi.srv.nintendo.net                 BACKEND_SCSI
+//	bcat-*                                BACKEND_BCAT
+//	demonware.net                         BACKEND_D3 (PROXY header)
+//	other nintendo.com / nintendo.net     baas-proxy if set, else BACKEND_DEFAULT
+//	anything else                         BACKEND_DEFAULT ("drop" or empty closes)
 package main
 
 import (
@@ -36,49 +46,118 @@ func envOr(k, d string) string {
 	return d
 }
 
+// route maps an SNI substring to a backend. nex marks the backends that read
+// the PROXY header (NEX auth servers correlate the auth and the secure
+// connection by source IP; behind a relay they would otherwise see 127.0.0.1
+// and refuse with "ticketless CONNECT with no recent auth from this address").
+// nx-dauth, baas-proxy and the REST services do not understand it.
+type route struct {
+	match   string
+	name    string
+	backend string
+	nex     bool
+}
+
 func main() {
 	listen := envOr("SNI_LISTEN", ":443")
 	mk8 := envOr("BACKEND_MK8", "127.0.0.1:8443")
-	ssbu := envOr("BACKEND_SSBU", "127.0.0.1:8444")
-	arms := envOr("BACKEND_ARMS", "127.0.0.1:8445")
-	acnh := envOr("BACKEND_ACNH", "127.0.0.1:8447")
-	acnhAPI := envOr("BACKEND_ACNH_API", "127.0.0.1:8448")
-	smb35 := envOr("BACKEND_SMB35", "127.0.0.1:8449")
-	tennis := envOr("BACKEND_TENNIS", "127.0.0.1:8450")
-	smm2 := envOr("BACKEND_SMM2", "127.0.0.1:8451")
-	dauth := envOr("BACKEND_DAUTH", "127.0.0.1:8446")
-	// Diablo III parle Demonware, pas NEX : son auth HTTPS
-	// (crimson-switch-auth3.*.demonware.net) va au serveur diablo-3. Le lobby
-	// (TCP/UDP 3074) ne passe pas par ici.
-	d3 := envOr("BACKEND_D3", "127.0.0.1:8460")
-	// Comptes : quand BACKEND_BAASPROXY est renseigné, tout le trafic
-	// accounts.nintendo.com / *.baas.nintendo.com / penne / vermillion part vers
-	// baas-proxy, qui relaie vers le vrai Nextendo (51.178.29.194) en gardant le
-	// Host d'origine -> on peut utiliser un compte Nextendo légitime avec la
-	// console pointée sur le stack local. Sinon on retombe sur BACKEND_BAAS
-	// (baas-jwks local) pour la vérification de la signature des tokens.
-	baas := envOr("BACKEND_BAAS", "127.0.0.1:8453")
-	baasproxy := envOr("BACKEND_BAASPROXY", "")
-	catchall := os.Getenv("BAASPROXY_CATCHALL") == "1"
 	def := envOr("BACKEND_DEFAULT", mk8)
 	proxyProto := envOr("SNI_PROXY_PROTOCOL", "") == "1"
+	catchall := os.Getenv("BAASPROXY_CATCHALL") == "1"
+
+	// Accounts: when BACKEND_BAASPROXY is set, every account host goes to
+	// baas-proxy, which relays to the real Nextendo keeping the original Host,
+	// so a legitimate Nextendo account works with the console pointed at the
+	// local stack. baas-proxy terminates its own TLS, so the stream is raw.
+	// Without it we fall back to baas-jwks (BACKEND_BAAS), which only serves
+	// /1.0.0/certificates and is enough for token signature checks.
+	baasproxy := envOr("BACKEND_BAASPROXY", "")
+	baas := envOr("BACKEND_BAAS", "127.0.0.1:8453")
+	dauth := envOr("BACKEND_DAUTH", "127.0.0.1:8446")
+	account := envOr("BACKEND_ACCOUNT", "")
+	pick := func(fallback string) string {
+		if baasproxy != "" {
+			return baasproxy
+		}
+		return fallback
+	}
+	if account == "" {
+		// accounts.nintendo.com arrives over TLS; the local account service
+		// only speaks HTTP, so tls-front terminates TLS in front of it.
+		account = pick("127.0.0.1:8455")
+	}
+
+	routes := []route{
+		{"g2b309e01", "mk8", mk8, true},
+		{"g23380901", "ssbu", envOr("BACKEND_SSBU", "127.0.0.1:8445"), true},
+		{"g25c08801", "arms", envOr("BACKEND_ARMS", ""), true},
+		{"g2ee2e300", "acnh", envOr("BACKEND_ACNH", "127.0.0.1:8447"), true},
+		{"g21f12900", "smb35", envOr("BACKEND_SMB35", ""), true},
+		{"g23932a00", "tennis", envOr("BACKEND_TENNIS", ""), true},
+		{"g22306d00", "smm2", envOr("BACKEND_SMM2", "127.0.0.1:8449"), true},
+		{"g241c6800", "bl1", envOr("BACKEND_BL1", "127.0.0.1:8456"), true},
+		{"g2e608000", "tl2", envOr("BACKEND_TL2", "127.0.0.1:8458"), true},
+		{"g27723500", "aw", envOr("BACKEND_AW", "127.0.0.1:8459"), true},
+		{"acbaa.srv.nintendo.net", "acnh-api", envOr("BACKEND_ACNH_API", ""), false},
+		{"ndas.srv.nintendo.net", "dauth", pick(dauth), false},
+		{"dragons.nintendo.net", "dauth", pick(dauth), false},
+		{"baas.nintendo.com", "baas", pick(baas), false},
+		{"penne.srv.nintendo.net", "baas", pick(baas), false},
+		{"vermillion.srv.nintendo.net", "baas", pick(baas), false},
+		{"accounts.nintendo.com", "account", account, false},
+		{"scsi.srv.nintendo.net", "scsi", envOr("BACKEND_SCSI", "127.0.0.1:8452"), false},
+		// bcat-list / bcat-topics / bcat-data on cdn.nintendo.net: the bcat
+		// server has its own TLS listener.
+		{"bcat-", "bcat", envOr("BACKEND_BCAT", ""), false},
+		// The diablo-3 auth reads the PROXY header like the NEX auths
+		// (NEXTENDO_PROXY_PROTOCOL=1); it serves the online check.
+		{"demonware.net", "d3", envOr("BACKEND_D3", "127.0.0.1:8460"), true},
+		// Anything else Nintendo-branded a game hits while going online (nnAccount
+		// link, CDN...) must not fall on the default backend and hang there.
+		{"nintendo.com", "nintendo", pick(def), false},
+		{"nintendo.net", "nintendo", pick(def), false},
+	}
 
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
-	log.Printf("SNI router on %s -> mk8=%s ssbu=%s arms=%s acnh=%s acnhAPI=%s smb35=%s tennis=%s smm2=%s dauth=%s d3=%s baas=%s baasproxy=%s catchall=%v default=%s", listen, mk8, ssbu, arms, acnh, acnhAPI, smb35, tennis, smm2, dauth, d3, baas, baasproxy, catchall, def)
+	// A route with no backend is off: its hosts fall through to the default
+	// (baas-proxy in proxy mode, so a game with no local server still reaches
+	// the real Nextendo instead of a wrong local one).
+	live := routes[:0]
+	for _, r := range routes {
+		if r.backend == "" {
+			log.Printf("  %-26s %-9s off (no BACKEND_*)", r.match, r.name)
+			continue
+		}
+		live = append(live, r)
+	}
+	routes = live
+
+	log.Printf("SNI router on %s proxy-protocol=%v catchall=%v default=%s", listen, proxyProto, catchall, def)
+	for _, r := range routes {
+		log.Printf("  %-26s %-9s -> %s", r.match, r.name, r.backend)
+	}
+
+	// The console sometimes omits the SNI (empty connections). With a
+	// baas-proxy and catch-all on, send those to it too, to catch the BAAS
+	// login/federation calls that carry no SNI.
+	noSNI := def
+	if catchall && baasproxy != "" {
+		noSNI = baasproxy
+	}
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, mk8, ssbu, arms, acnh, acnhAPI, smb35, tennis, smm2, dauth, d3, baas, baasproxy, catchall, def, proxyProto)
+		go handle(c, routes, def, noSNI, proxyProto)
 	}
 }
 
-func handle(c net.Conn, mk8, ssbu, arms, acnh, acnhAPI, smb35, tennis, smm2, dauth, d3, baas, baasproxy string, catchall bool, def string, proxyProto bool) {
+func handle(c net.Conn, routes []route, def, noSNI string, proxyProto bool) {
 	defer c.Close()
 
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -86,66 +165,26 @@ func handle(c net.Conn, mk8, ssbu, arms, acnh, acnhAPI, smb35, tennis, smm2, dau
 	_ = c.SetReadDeadline(time.Time{})
 
 	backend := def
-	// Les serveurs d'auth NEX corrèlent l'auth et la connexion secure par IP
-	// source. Nous étant un relais, ils voient la nôtre (127.0.0.1) alors que la
-	// secure arrive en direct depuis la console : « ticketless CONNECT with no
-	// recent auth from this address ». On préfixe donc l'en-tête PROXY pour leur
-	// donner la vraie adresse (ils écoutent en ListenSecureProxy). Réservé aux
-	// backends NEX : nx-dauth et l'upstream ne comprennent pas cet en-tête.
 	wantProxy := false
 	if err == nil {
-		switch {
-		case strings.Contains(sni, "g2b309e01"):
-			backend, wantProxy = mk8, proxyProto
-		case strings.Contains(sni, "g23380901"):
-			backend, wantProxy = ssbu, proxyProto
-		case strings.Contains(sni, "g25c08801"):
-			backend, wantProxy = arms, proxyProto
-		case strings.Contains(sni, "g2ee2e300"):
-			backend, wantProxy = acnh, proxyProto
-		case strings.Contains(sni, "g21f12900"):
-			backend, wantProxy = smb35, proxyProto
-		case strings.Contains(sni, "g23932a00"):
-			backend, wantProxy = tennis, proxyProto
-		case strings.Contains(sni, "g22306d00"):
-			backend, wantProxy = smm2, proxyProto
-		case strings.Contains(sni, "acbaa.srv.nintendo.net"):
-			// REST companion API, not NEX: no PROXY header.
-			backend = acnhAPI
-		case strings.Contains(sni, "ndas.srv.nintendo.net"), strings.Contains(sni, "dragons.nintendo.net"):
-			if baasproxy != "" {
-				backend = baasproxy
-			} else {
-				backend = dauth
+		for _, r := range routes {
+			if strings.Contains(sni, r.match) {
+				backend, wantProxy = r.backend, r.nex && proxyProto
+				break
 			}
-		case strings.Contains(sni, "baas.nintendo.com"), strings.Contains(sni, "penne.srv.nintendo.net"), strings.Contains(sni, "vermillion.srv.nintendo.net"):
-			if baasproxy != "" {
-				backend = baasproxy
-			} else {
-				backend = baas
-			}
-		case strings.Contains(sni, "nintendo.com"), strings.Contains(sni, "nintendo.net"), strings.Contains(sni, "cdn.nintendo.net"):
-			// accounts.nintendo.com (nnAccount link), bcat-topics-list / bcat-list
-			// CDN, etc. — anything else Nintendo-branded that a game hits while
-			// going online. Route to baas-proxy so these don't fall into the dead
-			// default backend (MK8) and hang the connection.
-			if baasproxy != "" {
-				backend = baasproxy
-			} else {
-				backend = def
-			}
-		case strings.Contains(sni, "demonware.net"):
-			// L'auth diablo-3 lit l'en-tete PROXY comme les auth NEX
-			// (NEXTENDO_PROXY_PROTOCOL=1) : il sert a l'online-check.
-			backend, wantProxy = d3, proxyProto
 		}
 	}
-	// La console omet parfois le SNI (connexions vides). Si un baas-proxy est
-	// configuré avec catch-all actif, on lui envoie quand même ces appels pour
-	// capter les connexions BAAS login/federation sans SNI.
-	if sni == "" && baasproxy != "" && catchall {
-		backend = baasproxy
+	if sni == "" {
+		backend = noSNI
 	}
+
+	// A host with no route used to land on the MK8 auth server, which cannot
+	// answer it and refused. BACKEND_DEFAULT=drop (or empty) closes instead.
+	if backend == "" || backend == "drop" {
+		log.Printf("conn from %s sni=%q -> drop (no route)", c.RemoteAddr(), sni)
+		return
+	}
+
 	log.Printf("conn from %s sni=%q -> %s", c.RemoteAddr(), sni, backend)
 
 	up, err := net.Dial("tcp", backend)
