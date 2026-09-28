@@ -202,8 +202,49 @@ func handle(c net.Conn, routes []route, def, noSNI string, proxyProto bool) {
 	if _, err := up.Write(hello); err != nil { // replay the buffered ClientHello
 		return
 	}
+	// SNI_TRACE=<host part>: log each TLS record header both ways for matching connections (and plaintext
+	// alerts in full), to see where a client's handshake stops without decrypting anything.
+	if t := os.Getenv("SNI_TRACE"); t != "" && strings.Contains(sni, t) {
+		id := c.RemoteAddr().String()
+		go func() { _, _ = io.Copy(up, io.TeeReader(c, &recordTrace{tag: id + " c->s"})) }()
+		_, _ = io.Copy(c, io.TeeReader(up, &recordTrace{tag: id + " s->c"}))
+		log.Printf("trace %s: closed", id)
+		return
+	}
 	go func() { _, _ = io.Copy(up, c) }()
 	_, _ = io.Copy(c, up)
+}
+
+// recordTrace parses a TLS record stream as it passes and logs the first records' headers.
+type recordTrace struct {
+	tag  string
+	buf  []byte
+	seen int
+}
+
+func (t *recordTrace) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	for len(t.buf) >= 5 && t.seen < 40 {
+		n := int(t.buf[3])<<8 | int(t.buf[4])
+		if len(t.buf) < 5+n {
+			break
+		}
+		typ := t.buf[0]
+		detail := ""
+		switch {
+		case typ == 21 && n == 2:
+			detail = fmt.Sprintf(" ALERT level=%d desc=%d", t.buf[5], t.buf[6])
+		case typ == 22 && n > 0:
+			detail = fmt.Sprintf(" handshake msg=%d", t.buf[5])
+		}
+		log.Printf("trace %s: record type=%d ver=%02x%02x len=%d%s", t.tag, typ, t.buf[1], t.buf[2], n, detail)
+		t.buf = t.buf[5+n:]
+		t.seen++
+	}
+	if t.seen >= 40 {
+		t.buf = nil
+	}
+	return len(p), nil
 }
 
 // peekClientHello reads the first TLS record (the ClientHello), returns the raw
