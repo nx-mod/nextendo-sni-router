@@ -124,6 +124,8 @@ func main() {
 		// Play and error reports (receive-*.dg / receive-*.er.srv.nintendo.net) go to the telemetry sink, never
 		// to Nintendo. Null-routed instead, the console's Test Connection failed (2160-6000).
 		{"receive-", "telemetry", envOr("BACKEND_TELEMETRY", "127.0.0.1:8472"), false},
+		// Title version list (tagaya.hac.lp1.eshop.nintendo.net): tagaya-nx serves its own TLS.
+		{"tagaya.hac", "tagaya", envOr("BACKEND_TAGAYA", "127.0.0.1:8471"), false},
 		// bcat-list / bcat-topics / bcat-data on cdn.nintendo.net: the bcat
 		// server has its own TLS listener.
 		{"bcat-", "bcat", envOr("BACKEND_BCAT", ""), false},
