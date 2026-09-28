@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Nextendo</title>
+<style>
+body{margin:0;background:#1b1b1f;color:#eee;font-family:sans-serif}
+.box{max-width:560px;margin:60px auto;padding:32px;background:#26262c;border-radius:12px}
+h1{margin:0 0 8px;font-size:30px;color:#e60012}
+p{color:#aaa;font-size:18px}
+input{display:block;width:100%;box-sizing:border-box;margin:10px 0;padding:16px;font-size:22px;border:0;border-radius:8px}
+button{width:100%;padding:18px;font-size:24px;background:#e60012;color:#fff;border:0;border-radius:8px}
+.err{color:#ff6b6b}
+</style></head><body><div class="box">
+<h1>Nextendo</h1>
+<p>Sign in with your Nextendo e-mail and password. A new e-mail creates the account.</p>
+
+<form method="post" action="/connect/1.0.0/authorize">
+<input type="hidden" name="client_id" value="x"><input type="hidden" name="redirect_uri" value="nintendo://a"><input type="hidden" name="response_type" value="code">
+<input type="hidden" name="nx_login" value="1">
+<input type="email" name="nx_email" placeholder="E-mail" value="">
+<input type="password" name="nx_password" placeholder="Password">
+<button type="submit">Sign in</button>
+</form></div></body></html>
