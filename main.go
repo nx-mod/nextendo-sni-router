@@ -118,6 +118,9 @@ func main() {
 		{"vermillion.srv.nintendo.net", "baas", pick(baas), false},
 		{"accounts.nintendo.com", "account", account, false},
 		{"scsi.srv.nintendo.net", "scsi", envOr("BACKEND_SCSI", "127.0.0.1:8452"), false},
+		// The console's connection test (api.hac.lp1.ctest.srv.nintendo.net since 18.0.0): dropped, Test
+		// Connection fails. baas-jwks answers it.
+		{"ctest.srv.nintendo.net", "ctest", envOr("BACKEND_CTEST", pick(baas)), false},
 		// bcat-list / bcat-topics / bcat-data on cdn.nintendo.net: the bcat
 		// server has its own TLS listener.
 		{"bcat-", "bcat", envOr("BACKEND_BCAT", ""), false},
