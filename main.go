@@ -121,6 +121,9 @@ func main() {
 		// The console's connection test (api.hac.lp1.ctest.srv.nintendo.net since 18.0.0): dropped, Test
 		// Connection fails. baas-jwks answers it.
 		{"ctest.srv.nintendo.net", "ctest", envOr("BACKEND_CTEST", pick(baas)), false},
+		// NSO membership (capi.lp1.op2.nintendo.net): baas-jwks answers it. Dropped, users linked to a Nintendo
+		// Account could not be opened or deleted.
+		{"op2.nintendo.net", "capi", envOr("BACKEND_CAPI", pick(baas)), false},
 		// Play and error reports (receive-*.dg / receive-*.er.srv.nintendo.net) go to the telemetry sink, never
 		// to Nintendo. Null-routed instead, the console's Test Connection failed (2160-6000).
 		{"receive-", "telemetry", envOr("BACKEND_TELEMETRY", "127.0.0.1:8472"), false},
